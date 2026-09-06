@@ -21,7 +21,7 @@ export default function Login() {
       const res = await api.post('/auth/login', { email, password });
       localStorage.setItem('token', res.data.token);
       localStorage.setItem('user', JSON.stringify(res.data.user));
-      window.location.href = res.data.user.roleKey === 'PORTAL' ? '/portal' : '/';
+      window.location.href = '/';
     } catch (err) {
       setError(apiError(err));
       setLoading(false);

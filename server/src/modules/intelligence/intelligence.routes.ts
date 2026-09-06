@@ -6,6 +6,8 @@ import {
   getBusinessHealth,
   getAnomalies,
   getCashFlowForecast,
+  previewEmail,
+  sendActionEmail,
 } from "./intelligence.controller";
 import { authenticate, blockPortal } from "../../middleware/auth.middleware";
 
@@ -19,5 +21,7 @@ router.get("/actions", getActionCenter);
 router.get("/health", getBusinessHealth);
 router.get("/anomalies", getAnomalies);
 router.get("/forecast", getCashFlowForecast);
+router.get("/email-preview", previewEmail);
+router.post("/send-email", sendActionEmail);
 
 export default router;

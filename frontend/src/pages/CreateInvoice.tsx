@@ -12,8 +12,10 @@ type LineRow = { productId: string; quantity: number; unitPrice: number; taxRate
 
 export default function CreateInvoice() {
   const navigate = useNavigate();
-  const { data: customers, loading: lc, error: ec } = useFetch<Contact[]>('/contacts?type=CUSTOMER');
-  const { data: products, loading: lp, error: ep } = useFetch<Product[]>('/products');
+  const { data: customerRes, loading: lc, error: ec } = useFetch<any>('/contacts?type=CUSTOMER&limit=1000');
+  const { data: productRes, loading: lp, error: ep } = useFetch<any>('/products?limit=1000');
+  const customers = customerRes?.data as Contact[] | undefined;
+  const products = productRes?.data as Product[] | undefined;
 
   const today = new Date().toISOString().slice(0, 10);
   const [customerId, setCustomerId] = useState('');
@@ -22,6 +24,7 @@ export default function CreateInvoice() {
   const [notes, setNotes] = useState('');
   const [lines, setLines] = useState<LineRow[]>([{ productId: '', quantity: 1, unitPrice: 0, taxRate: 18 }]);
   const [saving, setSaving] = useState(false);
+  const [creditError, setCreditError] = useState<any>(null);
 
   if (lc || lp) return <Loading label="Loading form…" />;
   if (ec || ep) return <ErrorState message={ec || ep || 'Failed to load'} />;
@@ -44,6 +47,7 @@ export default function CreateInvoice() {
     if (!customerId) return toast('Select a customer', 'error');
     const valid = lines.filter(l => l.productId && l.quantity > 0);
     if (valid.length === 0) return toast('Add at least one line item', 'error');
+    setCreditError(null);
     setSaving(true);
     try {
       const res = await api.post('/invoices', {
@@ -52,8 +56,13 @@ export default function CreateInvoice() {
       });
       toast('Invoice created');
       navigate(`/sales/${res.data.id}`);
-    } catch (err) {
-      toast(apiError(err), 'error');
+    } catch (err: any) {
+      // 422 = credit limit exceeded — show detailed inline banner
+      if (err?.response?.status === 422 && err.response.data?.creditLimit) {
+        setCreditError(err.response.data);
+      } else {
+        toast(apiError(err), 'error');
+      }
       setSaving(false);
     }
   };
@@ -64,6 +73,36 @@ export default function CreateInvoice() {
 
       <Card className="p-6">
         <h2 className="text-xl font-bold text-slate-900 mb-6">Create Invoice</h2>
+
+        {/* Credit limit error banner */}
+        {creditError && (
+          <div className="mb-5 p-4 rounded-xl bg-rose-50 border border-rose-200">
+            <div className="flex items-start gap-3">
+              <div className="w-8 h-8 rounded-full bg-rose-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+                <span className="text-rose-600 font-bold text-sm">!</span>
+              </div>
+              <div>
+                <p className="font-semibold text-rose-800 text-sm">Credit Limit Exceeded</p>
+                <p className="text-rose-700 text-sm mt-0.5">{creditError.detail}</p>
+                <div className="mt-2 flex flex-wrap gap-3 text-xs">
+                  <span className="bg-white border border-rose-200 text-rose-700 px-2 py-1 rounded-lg">
+                    Limit: ₹{Number(creditError.creditLimit).toLocaleString('en-IN')}
+                  </span>
+                  <span className="bg-white border border-rose-200 text-rose-700 px-2 py-1 rounded-lg">
+                    Outstanding: ₹{Number(creditError.outstanding).toLocaleString('en-IN')}
+                  </span>
+                  <span className="bg-white border border-rose-200 text-rose-700 px-2 py-1 rounded-lg">
+                    This invoice: ₹{Number(creditError.newInvoiceAmount).toLocaleString('en-IN')}
+                  </span>
+                  <span className="bg-rose-600 text-white px-2 py-1 rounded-lg font-semibold">
+                    Projected: ₹{Number(creditError.projectedBalance).toLocaleString('en-IN')}
+                  </span>
+                </div>
+                <p className="text-rose-600 text-xs mt-2">Please collect payment from this customer before creating a new invoice, or ask the owner to increase their credit limit in Contacts.</p>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
           <div>

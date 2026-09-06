@@ -4,12 +4,35 @@ import prisma from "../../utils/prisma";
 export const getAll = async (req: Request, res: Response) => {
   try {
     const companyId = (req as any).user.companyId;
-    const type = req.query.type ? String(req.query.type) : undefined;
-    const where: any = { companyId };
+
+    const page   = Math.max(1, parseInt(String(req.query.page  || '1'), 10));
+    const limit  = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '20'), 10)));
+    const search = String(req.query.search || '').trim();
+    const type   = String(req.query.type   || '').trim().toUpperCase();
+
+    const where: any = { companyId, isActive: true };
     if (type === 'CUSTOMER') where.type = { in: ['CUSTOMER', 'BOTH'] };
     else if (type === 'VENDOR') where.type = { in: ['VENDOR', 'BOTH'] };
-    const data = await prisma.contacts.findMany({ where, orderBy: { name: 'asc' } });
-    res.json(data);
+    if (search) {
+      where.OR = [
+        { name:  { contains: search, mode: 'insensitive' } },
+        { email: { contains: search, mode: 'insensitive' } },
+        { gstin: { contains: search, mode: 'insensitive' } },
+        { phone: { contains: search, mode: 'insensitive' } },
+      ];
+    }
+
+    const [total, data] = await prisma.$transaction([
+      prisma.contacts.count({ where }),
+      prisma.contacts.findMany({
+        where,
+        orderBy: { name: 'asc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+    ]);
+
+    res.json({ data, total, page, pageCount: Math.ceil(total / limit) });
   } catch (error: any) {
     res.status(500).json({ message: "Server Error", error: error.message });
   }
@@ -68,6 +91,7 @@ export const update = async (req: Request, res: Response) => {
     for (const f of ['name', 'displayName', 'gstin', 'email', 'phone', 'billingLine1', 'billingCity', 'billingState', 'billingPincode', 'notes', 'type', 'isActive']) {
       if (b[f] !== undefined) patch[f] = b[f];
     }
+    if (b.creditLimit !== undefined) patch.creditLimit = Number(b.creditLimit) || 0;
     const data = await prisma.contacts.update({ where: { id: req.params.id }, data: patch });
     res.json(data);
   } catch (error: any) {

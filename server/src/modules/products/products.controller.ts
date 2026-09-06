@@ -4,8 +4,42 @@ import prisma from "../../utils/prisma";
 export const getAll = async (req: Request, res: Response) => {
   try {
     const companyId = (req as any).user.companyId;
-    const data = await prisma.products.findMany({ where: { companyId }, orderBy: { name: 'asc' } });
-    res.json(data);
+
+    const page     = Math.max(1, parseInt(String(req.query.page     || '1'), 10));
+    const limit    = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '20'), 10)));
+    const search   = String(req.query.search   || '').trim();
+    const lowStock = req.query.lowStock === 'true';
+
+    // Summary stats always run on the FULL dataset (unpaginated)
+    const allActive = await prisma.products.findMany({ where: { companyId, isActive: true } });
+    const totalValue = allActive.reduce((s, p) => s + Number(p.onHandQty) * Number(p.avgCost || p.purchasePrice), 0);
+    const lowCount   = allActive.filter(p => Number(p.reorderLevel) > 0 && Number(p.onHandQty) <= Number(p.reorderLevel)).length;
+
+    const where: any = { companyId, isActive: true };
+    if (search) {
+      where.OR = [
+        { name: { contains: search, mode: 'insensitive' } },
+        { sku:  { contains: search, mode: 'insensitive' } },
+      ];
+    }
+    // lowStock filter: onHandQty <= reorderLevel AND reorderLevel > 0
+    // Prisma doesn't support column-to-column comparison directly, handled post-query if needed
+    // but we can filter on reorderLevel > 0 at DB and onHandQty at DB with raw
+    // Simplest approach: add a post-filter flag handled in the query below
+    const items = await prisma.products.findMany({
+      where,
+      orderBy: { name: 'asc' },
+    });
+
+    const filtered = lowStock
+      ? items.filter(p => Number(p.reorderLevel) > 0 && Number(p.onHandQty) <= Number(p.reorderLevel))
+      : items;
+
+    const total     = filtered.length;
+    const pageCount = Math.ceil(total / limit);
+    const data      = filtered.slice((page - 1) * limit, page * limit);
+
+    res.json({ data, total, page, pageCount, stats: { totalProducts: allActive.length, totalValue, lowCount } });
   } catch (error: any) {
     res.status(500).json({ message: "Server Error", error: error.message });
   }

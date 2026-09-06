@@ -1,5 +1,131 @@
 import { Request, Response } from "express";
+import nodemailer from "nodemailer";
 import prisma from "../../utils/prisma";
+
+// ---- Helpers ----
+const fmt = (n: number) => `\u20B9${Math.round(n).toLocaleString('en-IN')}`;
+
+function emailShell(body: string): string {
+  return `<div style="font-family:'Segoe UI',Arial,sans-serif;max-width:600px;margin:0 auto;background:#f8fafc;padding:20px">
+  <div style="background:white;border-radius:12px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08)">
+    <div style="background:#0f172a;padding:24px 32px">
+      <h2 style="color:white;margin:0;font-size:20px;font-weight:600">Urban Furniture</h2>
+      <p style="color:#94a3b8;margin:4px 0 0;font-size:13px">Business Operations</p>
+    </div>
+    <div style="padding:32px">${body}</div>
+    <div style="background:#f1f5f9;padding:16px 32px;text-align:center">
+      <p style="color:#94a3b8;margin:0;font-size:12px">Urban Furniture &middot; Automated billing notification.</p>
+    </div>
+  </div>
+</div>`;
+}
+
+function buildOverdueEmail(customerName: string, invoiceNo: string, days: number, outstanding: number) {
+  return emailShell(`
+    <p style="color:#0f172a;font-size:16px;margin-top:0">Dear <strong>${customerName}</strong>,</p>
+    <p style="color:#475569">We hope this finds you well. We are writing regarding the following outstanding invoice:</p>
+    <div style="background:#fef2f2;border-left:4px solid #ef4444;border-radius:8px;padding:16px 20px;margin:20px 0">
+      <p style="margin:0 0 8px;color:#0f172a"><strong>Invoice:</strong> ${invoiceNo}</p>
+      <p style="margin:0 0 8px;color:#0f172a"><strong>Days Overdue:</strong> ${days} day(s)</p>
+      <p style="margin:0;color:#ef4444;font-size:18px;font-weight:700">Amount Due: ${fmt(outstanding)}</p>
+    </div>
+    <p style="color:#475569">We kindly request settlement at the earliest. If payment has already been made, please share the details with us.</p>
+    <p style="color:#475569;margin-bottom:0">Warm regards,<br><strong>Finance Team</strong><br>Urban Furniture</p>
+  `);
+}
+
+function buildUpcomingEmail(customerName: string, invoiceNo: string, daysUntilDue: number, amount: number) {
+  return emailShell(`
+    <p style="color:#0f172a;font-size:16px;margin-top:0">Dear <strong>${customerName}</strong>,</p>
+    <p style="color:#475569">This is a friendly reminder that the following invoice is due soon:</p>
+    <div style="background:#fffbeb;border-left:4px solid #f59e0b;border-radius:8px;padding:16px 20px;margin:20px 0">
+      <p style="margin:0 0 8px;color:#0f172a"><strong>Invoice:</strong> ${invoiceNo}</p>
+      <p style="margin:0 0 8px;color:#0f172a"><strong>Due In:</strong> ${daysUntilDue} day(s)</p>
+      <p style="margin:0;color:#f59e0b;font-size:18px;font-weight:700">Amount: ${fmt(amount)}</p>
+    </div>
+    <p style="color:#475569">Please arrange payment before the due date to avoid any late charges. Contact us if you need assistance.</p>
+    <p style="color:#475569;margin-bottom:0">Warm regards,<br><strong>Finance Team</strong><br>Urban Furniture</p>
+  `);
+}
+
+function buildLowStockEmail(vendorName: string, productName: string, sku: string, currentQty: number, reorderQty: number) {
+  return emailShell(`
+    <p style="color:#0f172a;font-size:16px;margin-top:0">Dear <strong>${vendorName}</strong>,</p>
+    <p style="color:#475569">We hope this finds you well. We are writing to enquire about restocking the following product:</p>
+    <div style="background:#f0fdf4;border-left:4px solid #22c55e;border-radius:8px;padding:16px 20px;margin:20px 0">
+      <p style="margin:0 0 8px;color:#0f172a"><strong>Product:</strong> ${productName}</p>
+      <p style="margin:0 0 8px;color:#0f172a"><strong>SKU:</strong> ${sku}</p>
+      <p style="margin:0 0 8px;color:#0f172a"><strong>Current Stock:</strong> ${currentQty} units</p>
+      <p style="margin:0;color:#16a34a;font-size:18px;font-weight:700">Quantity Required: ${reorderQty} units</p>
+    </div>
+    <p style="color:#475569">Kindly confirm availability, pricing, and earliest delivery date at your convenience.</p>
+    <p style="color:#475569;margin-bottom:0">Best regards,<br><strong>Procurement Team</strong><br>Urban Furniture</p>
+  `);
+}
+
+function makeTransporter() {
+  if (!(process.env.SMTP_HOST && process.env.SMTP_USER)) return null;
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT || 587),
+    secure: process.env.SMTP_SECURE === 'true',
+    auth: { user: process.env.SMTP_USER!, pass: process.env.SMTP_PASS! },
+  });
+}
+
+async function buildEmailPayload(companyId: string, type: string, referenceId: string) {
+  if (type === 'OVERDUE_INVOICE' || type === 'UPCOMING_DUE') {
+    const inv = await prisma.invoices.findFirst({
+      where: { id: referenceId, companyId },
+      include: { customer: true },
+    });
+    if (!inv) throw new Error('Invoice not found');
+    if (!inv.customer.email) throw new Error(`Customer "${inv.customer.name}" has no email address. Add it in Contacts.`);
+    const outstanding = Number(inv.totalAmount) - Number(inv.paidAmount);
+    const now = Date.now();
+    if (type === 'OVERDUE_INVOICE') {
+      const days = inv.dueDate ? Math.floor((now - new Date(inv.dueDate).getTime()) / 86400000) : 0;
+      return {
+        to: inv.customer.email,
+        toName: inv.customer.name,
+        subject: `Payment Reminder: Invoice ${inv.invoiceNumber}`,
+        html: buildOverdueEmail(inv.customer.name, inv.invoiceNumber, days, outstanding),
+        preview: `Overdue reminder to ${inv.customer.name} for invoice ${inv.invoiceNumber} (${days} day(s) overdue, ${fmt(outstanding)} outstanding).`,
+      };
+    } else {
+      const daysUntilDue = inv.dueDate ? Math.ceil((new Date(inv.dueDate).getTime() - now) / 86400000) : 0;
+      return {
+        to: inv.customer.email,
+        toName: inv.customer.name,
+        subject: `Friendly Reminder: Invoice ${inv.invoiceNumber} due in ${daysUntilDue} day(s)`,
+        html: buildUpcomingEmail(inv.customer.name, inv.invoiceNumber, daysUntilDue, outstanding),
+        preview: `Upcoming reminder to ${inv.customer.name} for invoice ${inv.invoiceNumber} (due in ${daysUntilDue} day(s), ${fmt(outstanding)}).`,
+      };
+    }
+  }
+
+  if (type === 'LOW_STOCK') {
+    const product = await prisma.products.findFirst({ where: { id: referenceId, companyId } });
+    if (!product) throw new Error('Product not found');
+    const poLine = await (prisma as any).purchase_order_lines.findFirst({
+      where: { productId: referenceId },
+      include: { order: { include: { vendor: true } } },
+    });
+    const vendor = poLine?.order?.vendor;
+    if (!vendor?.email) throw new Error(`No vendor with an email address found for "${product.name}". Link a vendor via a purchase order, or add an email to a vendor contact.`);
+    const onHand = Number(product.onHandQty);
+    const reorderQty = Math.max(Number(product.reorderLevel) * 2, 10);
+    return {
+      to: vendor.email,
+      toName: vendor.name,
+      subject: `Restock Enquiry: ${product.name}`,
+      html: buildLowStockEmail(vendor.name, product.name, product.sku, onHand, reorderQty),
+      preview: `Restock enquiry to ${vendor.name} for product "${product.name}" (SKU: ${product.sku}, current stock: ${onHand}, requesting: ${reorderQty} units).`,
+    };
+  }
+
+  throw new Error(`Email not supported for action type: ${type}`);
+}
 
 // ---- Smart Reorder: explainable, based on actual sales velocity ----
 export const getSmartReorder = async (req: Request, res: Response) => {
@@ -191,6 +317,30 @@ export const getActionCenter = async (req: Request, res: Response) => {
       });
     }
 
+    // Upcoming invoices (due in 1–7 days)
+    const soonDue = await prisma.invoices.findMany({
+      where: { companyId, status: { in: ['OPEN', 'PARTIAL'] }, dueDate: { gte: now, lte: new Date(Date.now() + 7 * 86400000) } },
+      include: { customer: true },
+      orderBy: { dueDate: 'asc' },
+    });
+    for (const inv of soonDue) {
+      const daysUntil = Math.ceil((new Date(inv.dueDate!).getTime() - now.getTime()) / 86400000);
+      const outstanding = Number(inv.totalAmount) - Number(inv.paidAmount);
+      if (outstanding <= 0) continue;
+      actions.push({
+        id: `upcoming-${inv.id}`,
+        type: 'UPCOMING_DUE',
+        priority: daysUntil <= 2 ? 'HIGH' : 'MEDIUM',
+        title: `Due soon: ${inv.invoiceNumber} — ${inv.customer.name}`,
+        amount: outstanding,
+        detail: `Due in ${daysUntil} day(s)`,
+        referenceId: inv.id,
+        action: 'SEND_REMINDER',
+        contactEmail: inv.customer.email,
+        contactName: inv.customer.name,
+      });
+    }
+
     // Low stock
     const products = await prisma.products.findMany({ where: { companyId, trackInventory: true, isActive: true } });
     for (const p of products) {
@@ -226,6 +376,41 @@ export const getActionCenter = async (req: Request, res: Response) => {
     res.json(actions);
   } catch (error: any) {
     res.status(500).json({ message: "Server Error", error: error.message });
+  }
+};
+
+// ---- Email preview (no send) ----
+export const previewEmail = async (req: Request, res: Response) => {
+  try {
+    const companyId = (req as any).user.companyId;
+    const { type, referenceId } = req.query as { type: string; referenceId: string };
+    if (!type || !referenceId) return res.status(400).json({ message: 'type and referenceId are required' });
+    const smtpConfigured = !!(process.env.SMTP_HOST && process.env.SMTP_USER);
+    const payload = await buildEmailPayload(companyId, type, referenceId);
+    res.json({ ...payload, smtpConfigured });
+  } catch (error: any) {
+    res.status(400).json({ message: error.message });
+  }
+};
+
+// ---- Send email for an action ----
+export const sendActionEmail = async (req: Request, res: Response) => {
+  try {
+    const companyId = (req as any).user.companyId;
+    const { type, referenceId } = req.body;
+    if (!type || !referenceId) return res.status(400).json({ message: 'type and referenceId are required' });
+    const transporter = makeTransporter();
+    if (!transporter) return res.status(400).json({ message: 'SMTP not configured. Add SMTP_HOST, SMTP_USER, SMTP_PASS, SMTP_FROM to your server .env file.' });
+    const payload = await buildEmailPayload(companyId, type, referenceId);
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || '"Urban Furniture" <finance@urbanfurniture.com>',
+      to: payload.to,
+      subject: payload.subject,
+      html: payload.html,
+    });
+    res.json({ sent: true, to: payload.to, toName: payload.toName, subject: payload.subject });
+  } catch (error: any) {
+    res.status(500).json({ message: error.message });
   }
 };
 

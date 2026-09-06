@@ -21,14 +21,35 @@ function computeLines(lines: any[]) {
 export const getAll = async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    const where: any = { companyId: user.companyId };
+    const companyId = user.companyId;
+
+    const page   = Math.max(1, parseInt(String(req.query.page  || '1'), 10));
+    const limit  = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '15'), 10)));
+    const search = String(req.query.search || '').trim();
+    const status = String(req.query.status || '').trim().toUpperCase();
+
+    const where: any = { companyId };
     if (user.contactId) where.customerId = user.contactId; // portal isolation
-    const data = await prisma.invoices.findMany({
-      where,
-      include: { customer: true, lines: { include: { product: true } } },
-      orderBy: { date: 'desc' },
-    });
-    res.json(data);
+    if (status && status !== 'ALL') where.status = status;
+    if (search) {
+      where.OR = [
+        { invoiceNumber: { contains: search, mode: 'insensitive' } },
+        { customer:      { name: { contains: search, mode: 'insensitive' } } },
+      ];
+    }
+
+    const [total, data] = await prisma.$transaction([
+      prisma.invoices.count({ where }),
+      prisma.invoices.findMany({
+        where,
+        include: { customer: true, lines: { include: { product: true } } },
+        orderBy: [{ date: 'desc' }, { createdAt: 'desc' }, { invoiceNumber: 'desc' }],
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+    ]);
+
+    res.json({ data, total, page, pageCount: Math.ceil(total / limit) });
   } catch (error: any) {
     res.status(500).json({ message: "Server Error", error: error.message });
   }
@@ -60,6 +81,37 @@ export const create = async (req: Request, res: Response) => {
     }
 
     const { computed, net, tax, gross } = computeLines(lines);
+
+    // ── Credit limit enforcement ──────────────────────────────────────────────
+    const customer = await prisma.contacts.findFirst({ where: { id: customerId, companyId } });
+    if (!customer) return res.status(404).json({ message: 'Customer not found' });
+
+    const limit = Number(customer.creditLimit || 0);
+    if (limit > 0) {
+      // Sum all open/partial invoice balances for this customer
+      const openInvoices = await prisma.invoices.findMany({
+        where: { companyId, customerId, status: { in: ['OPEN', 'PARTIAL'] } },
+        select: { totalAmount: true, paidAmount: true },
+      });
+      const outstanding = openInvoices.reduce(
+        (sum, inv) => sum + (Number(inv.totalAmount) - Number(inv.paidAmount)), 0,
+      );
+      const projectedBalance = Math.round((outstanding + gross) * 100) / 100;
+      if (projectedBalance > limit) {
+        return res.status(422).json({
+          message: `Credit limit exceeded`,
+          detail: `${customer.name} has a credit limit of ₹${limit.toLocaleString('en-IN')}. ` +
+                  `Current outstanding: ₹${Math.round(outstanding).toLocaleString('en-IN')}, ` +
+                  `new invoice: ₹${Math.round(gross).toLocaleString('en-IN')}, ` +
+                  `projected total: ₹${Math.round(projectedBalance).toLocaleString('en-IN')}.`,
+          creditLimit: limit,
+          outstanding: Math.round(outstanding),
+          newInvoiceAmount: Math.round(gross),
+          projectedBalance: Math.round(projectedBalance),
+        });
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     const result = await prisma.$transaction(async (tx) => {
       // Sequential invoice number

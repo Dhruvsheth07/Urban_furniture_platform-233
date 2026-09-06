@@ -1,9 +1,9 @@
 import { Request, Response } from "express";
 import { GoogleGenAI } from '@google/genai';
 import prisma from "../../utils/prisma";
-const pdfParse = require('pdf-parse');
+import { extractTextFromPdfBuffer, parseInvoiceText } from "../../services/ocr.service";
 
-// ---- Supplier bill extraction (AI proposes; human confirms before posting) ----
+// ---- Supplier bill extraction (OCR; human confirms before posting) ----
 export const parseSupplierBill = async (req: Request, res: Response): Promise<void> => {
   try {
     if (!req.file) {
@@ -12,75 +12,61 @@ export const parseSupplierBill = async (req: Request, res: Response): Promise<vo
     }
 
     const companyId = (req as any).user.companyId;
-    let text = '';
+
+    // Step 1 — extract raw text via pdfjs-dist + Tesseract.js
+    let rawText = '';
     try {
-      const pdfData = await pdfParse(req.file.buffer);
-      text = pdfData.text || '';
-    } catch {
-      text = '';
+      rawText = await extractTextFromPdfBuffer(req.file.buffer);
+    } catch (ocrErr: any) {
+      console.error('[OCR] Extraction error:', ocrErr.message);
+      rawText = '';
     }
 
-    let extracted: any;
-    let confidence = 'LOW';
+    // Step 2 — parse structured fields from raw text
+    const { extracted, confidence } = rawText.trim().length > 20
+      ? parseInvoiceText(rawText)
+      : {
+          extracted: {
+            vendorName: '', invoiceNumber: '',
+            date: new Date().toISOString().slice(0, 10),
+            dueDate: null, items: [], subtotal: 0, taxAmount: 0, totalAmount: 0,
+          },
+          confidence: 'LOW' as const,
+        };
 
-    if (process.env.GEMINI_API_KEY && text.trim().length > 0) {
-      try {
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-        const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: [
-            "You extract structured data from an Indian supplier/vendor invoice. Return ONLY JSON with keys: vendorName (string), invoiceNumber (string), date (YYYY-MM-DD), dueDate (YYYY-MM-DD or null), items (array of {description, quantity, unitPrice, taxRate}), subtotal (number), taxAmount (number), totalAmount (number). Use numbers without currency symbols.",
-            text.slice(0, 12000),
-          ],
-          config: { responseMimeType: "application/json" },
-        });
-        extracted = JSON.parse(response.text || "{}");
-        confidence = 'HIGH';
-      } catch (e) {
-        extracted = null;
-      }
-    }
-
-    if (!extracted) {
-      // Heuristic fallback so the flow works without an API key
-      const invMatch = text.match(/(?:invoice|bill)\s*(?:no|number|#)?[:\s]*([A-Z0-9\-\/]+)/i);
-      const totalMatch = text.match(/(?:total|grand total|amount due)[:\s]*(?:₹|rs\.?|inr)?\s*([\d,]+\.?\d*)/i);
-      extracted = {
-        vendorName: '',
-        invoiceNumber: invMatch ? invMatch[1] : '',
-        date: new Date().toISOString().slice(0, 10),
-        dueDate: null,
-        items: [],
-        subtotal: 0,
-        taxAmount: 0,
-        totalAmount: totalMatch ? Number(totalMatch[1].replace(/,/g, '')) : 0,
-      };
-      confidence = process.env.GEMINI_API_KEY ? 'LOW' : 'LOW (no AI key — heuristic extraction)';
-    }
-
-    // Duplicate detection against existing bills
+    // Step 3 — duplicate detection
     let duplicate = null;
     if (extracted.invoiceNumber) {
-      const existing = await prisma.vendor_bills.findFirst({ where: { companyId, billNumber: extracted.invoiceNumber } });
+      const existing = await prisma.vendor_bills.findFirst({
+        where: { companyId, billNumber: extracted.invoiceNumber },
+      });
       if (existing) duplicate = { id: existing.id, billNumber: existing.billNumber };
     }
 
-    // Try to match vendor by name
+    // Step 4 — vendor name fuzzy match
     let matchedVendorId = null;
     if (extracted.vendorName) {
-      const vendor = await prisma.contacts.findFirst({ where: { companyId, type: { in: ['VENDOR', 'BOTH'] }, name: { contains: extracted.vendorName, mode: 'insensitive' } } });
+      const vendor = await prisma.contacts.findFirst({
+        where: {
+          companyId,
+          type: { in: ['VENDOR', 'BOTH'] },
+          name: { contains: extracted.vendorName, mode: 'insensitive' },
+        },
+      });
       if (vendor) matchedVendorId = vendor.id;
     }
 
+    // Step 5 — warnings for missing/low-confidence fields
     const warnings: string[] = [];
     if (duplicate) warnings.push(`An existing bill ${duplicate.billNumber} matches this invoice number.`);
     if (!extracted.vendorName) warnings.push('Vendor name could not be extracted — please select manually.');
     if (!extracted.totalAmount) warnings.push('Total amount could not be determined — please verify.');
     if (!matchedVendorId && extracted.vendorName) warnings.push(`No existing vendor matches "${extracted.vendorName}".`);
+    if (extracted.items.length === 0) warnings.push('No line items were detected — you may need to add them manually.');
 
-    res.json({ extracted, confidence, duplicate, matchedVendorId, warnings, requiresConfirmation: true });
+    res.json({ extracted, confidence, duplicate, matchedVendorId, warnings, requiresConfirmation: true, source: 'tesseract-ocr' });
   } catch (error: any) {
-    res.status(500).json({ message: "AI Parsing Error", error: error.message });
+    res.status(500).json({ message: "OCR Parsing Error", error: error.message });
   }
 };
 

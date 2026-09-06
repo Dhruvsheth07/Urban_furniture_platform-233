@@ -1,22 +1,21 @@
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, ShoppingCart, Package, Boxes, BookOpen, PieChart,
-  Sparkles, Bell, MessageSquare, Zap, Users, LogOut, Building2, HeartPulse,
+  Sparkles, Bell, Zap, Users, LogOut, Building2,
 } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import SalesList from './pages/SalesList';
 import PurchaseList from './pages/PurchaseList';
 import InvoiceDetail from './pages/InvoiceDetail';
 import CreateInvoice from './pages/CreateInvoice';
-import BusinessHealth from './pages/BusinessHealth';
 import ActionCenter from './pages/ActionCenter';
-import AskBusiness from './pages/AskBusiness';
 import ReportsHub from './pages/ReportsHub';
 import Inventory from './pages/Inventory';
 import Accounting from './pages/Accounting';
 import Contacts from './pages/Contacts';
 import Automation from './pages/Automation';
-import CustomerPortal from './pages/CustomerPortal';
+import CreateVendorBill from './pages/CreateVendorBill';
+import TeamManagement from './pages/TeamManagement';
 import Login from './pages/Login';
 
 type NavItem = { to: string; label: string; icon: React.ReactNode };
@@ -27,7 +26,6 @@ const NAV: NavSection[] = [
     heading: 'Overview',
     items: [
       { to: '/', label: 'Dashboard', icon: <LayoutDashboard size={18} /> },
-      { to: '/health', label: 'Business Health', icon: <HeartPulse size={18} /> },
     ],
   },
   {
@@ -50,8 +48,16 @@ const NAV: NavSection[] = [
     heading: 'Intelligence',
     items: [
       { to: '/actions', label: 'Action Center', icon: <Bell size={18} /> },
-      { to: '/ask', label: 'Ask Your Business', icon: <MessageSquare size={18} /> },
       { to: '/automation', label: 'Automation', icon: <Zap size={18} /> },
+    ],
+  },
+];
+
+const ADMIN_NAV: NavSection[] = [
+  {
+    heading: 'Settings',
+    items: [
+      { to: '/team', label: 'Team & Users', icon: <Users size={18} /> },
     ],
   },
 ];
@@ -61,10 +67,10 @@ function getUser() {
 }
 
 const PAGE_TITLES: Record<string, string> = {
-  '/': 'Dashboard', '/health': 'Business Health', '/sales': 'Sales & Invoices',
+  '/': 'Dashboard', '/sales': 'Sales & Invoices',
   '/purchases': 'Purchases & Bills', '/inventory': 'Inventory', '/contacts': 'Contacts',
   '/accounting': 'Accounting', '/reports': 'Reports', '/actions': 'Action Center',
-  '/ask': 'Ask Your Business', '/automation': 'Automation',
+  '/automation': 'Automation', '/team': 'Team & Users',
 };
 
 function AppLayout({ children }: { children: React.ReactNode }) {
@@ -85,7 +91,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
           </div>
         </div>
         <nav className="flex-1 px-3 py-4 space-y-5 overflow-y-auto scroll-thin">
-          {NAV.map((section) => (
+          {[...NAV, ...(['ADMIN', 'OWNER'].includes(user?.roleKey) ? ADMIN_NAV : [])].map((section) => (
             <div key={section.heading}>
               <div className="px-3 mb-1.5 text-[11px] uppercase tracking-wider text-slate-500 font-semibold">{section.heading}</div>
               <div className="space-y-0.5">
@@ -139,9 +145,7 @@ function AppLayout({ children }: { children: React.ReactNode }) {
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const token = localStorage.getItem('token');
-  const user = getUser();
   if (!token) return <Navigate to="/login" replace />;
-  if (user?.roleKey === 'PORTAL') return <Navigate to="/portal" replace />;
   return <>{children}</>;
 }
 
@@ -150,7 +154,6 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
-        <Route path="/portal/*" element={<CustomerPortal />} />
         <Route
           path="/*"
           element={
@@ -158,18 +161,18 @@ export default function App() {
               <AppLayout>
                 <Routes>
                   <Route path="/" element={<Dashboard />} />
-                  <Route path="/health" element={<BusinessHealth />} />
                   <Route path="/sales" element={<SalesList />} />
                   <Route path="/sales/new" element={<CreateInvoice />} />
                   <Route path="/sales/:id" element={<InvoiceDetail />} />
                   <Route path="/purchases" element={<PurchaseList />} />
+                  <Route path="/purchases/new" element={<CreateVendorBill />} />
                   <Route path="/inventory" element={<Inventory />} />
                   <Route path="/contacts" element={<Contacts />} />
                   <Route path="/accounting" element={<Accounting />} />
                   <Route path="/reports" element={<ReportsHub />} />
                   <Route path="/actions" element={<ActionCenter />} />
-                  <Route path="/ask" element={<AskBusiness />} />
                   <Route path="/automation" element={<Automation />} />
+                  <Route path="/team" element={<TeamManagement />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
               </AppLayout>

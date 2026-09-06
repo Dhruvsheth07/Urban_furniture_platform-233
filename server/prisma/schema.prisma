@@ -150,6 +150,7 @@ model contacts {
   billingPincode  String?
   billingCountry  String?           @default("IN")
   notes           String?
+  creditLimit     Decimal?          @default(0)
   isActive        Boolean           @default(true)
   createdAt       DateTime          @default(now())
   updatedAt       DateTime

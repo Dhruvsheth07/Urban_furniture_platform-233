@@ -1,6 +1,5 @@
-import { useState, useMemo } from 'react';
-import { Search, Mail, Phone, Plus, Pencil, Trash2, X, Loader2 } from 'lucide-react';
-import { useFetch } from '../lib/useFetch';
+import { useState, useEffect, useCallback } from 'react';
+import { Search, Mail, Phone, Plus, Pencil, Trash2, X, Loader2, ChevronLeft, ChevronRight } from 'lucide-react';
 import api, { apiError } from '../lib/api';
 import { Card, Badge, Loading, ErrorState, EmptyState, Table, Th, Td, Button, PageHeader, toast } from '../components/ui';
 
@@ -8,17 +7,64 @@ type Contact = {
   id: string; type: string; name: string; displayName?: string;
   gstin?: string; email?: string; phone?: string;
   billingLine1?: string; billingCity?: string; billingState?: string; billingPincode?: string;
-  notes?: string; isActive?: boolean;
+  notes?: string; isActive?: boolean; creditLimit?: number | string;
 };
+type PagedResponse = { data: Contact[]; total: number; page: number; pageCount: number };
 
 const TABS = ['ALL', 'CUSTOMER', 'VENDOR'];
+const PAGE_SIZE = 20;
 
 const EMPTY_FORM = {
   name: '', displayName: '', type: 'CUSTOMER', gstin: '',
   email: '', phone: '', billingLine1: '', billingCity: '',
-  billingState: '', billingPincode: '', notes: '',
+  billingState: '', billingPincode: '', notes: '', creditLimit: '',
 };
 type FormData = typeof EMPTY_FORM;
+
+/* ── Pagination ── */
+function Pagination({ page, pageCount, total, limit, onPage }: {
+  page: number; pageCount: number; total: number; limit: number; onPage: (p: number) => void;
+}) {
+  if (pageCount <= 1) return null;
+  const from = (page - 1) * limit + 1;
+  const to   = Math.min(page * limit, total);
+  const pages: (number | '…')[] = [];
+  const add = (n: number) => { if (!pages.includes(n)) pages.push(n); };
+  add(1);
+  if (page > 3) pages.push('…');
+  if (page > 2) add(page - 1);
+  add(page);
+  if (page < pageCount - 1) add(page + 1);
+  if (page < pageCount - 2) pages.push('…');
+  add(pageCount);
+
+  return (
+    <div className="px-6 py-3 border-t border-slate-100 flex items-center justify-between gap-4">
+      <span className="text-slate-500 text-xs">
+        Showing <span className="font-medium text-slate-700">{from}–{to}</span> of{' '}
+        <span className="font-medium text-slate-700">{total}</span> contacts
+      </span>
+      <div className="flex items-center gap-1">
+        <button onClick={() => onPage(page - 1)} disabled={page === 1}
+          className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 disabled:opacity-30 disabled:cursor-not-allowed">
+          <ChevronLeft size={15} />
+        </button>
+        {pages.map((p, i) =>
+          p === '…'
+            ? <span key={`e-${i}`} className="px-1 text-slate-400">…</span>
+            : <button key={p} onClick={() => onPage(Number(p))}
+                className={`w-8 h-8 rounded-lg text-xs font-medium transition-colors ${
+                  p === page ? 'bg-brand-600 text-white' : 'hover:bg-slate-100 text-slate-600'
+                }`}>{p}</button>
+        )}
+        <button onClick={() => onPage(page + 1)} disabled={page === pageCount}
+          className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 disabled:opacity-30 disabled:cursor-not-allowed">
+          <ChevronRight size={15} />
+        </button>
+      </div>
+    </div>
+  );
+}
 
 /* ── Add / Edit Modal ── */
 function ContactModal({ initial, onClose, onSaved }: { initial?: Contact | null; onClose: () => void; onSaved: () => void }) {
@@ -29,12 +75,11 @@ function ContactModal({ initial, onClose, onSaved }: { initial?: Contact | null;
           gstin: initial.gstin || '', email: initial.email || '', phone: initial.phone || '',
           billingLine1: initial.billingLine1 || '', billingCity: initial.billingCity || '',
           billingState: initial.billingState || '', billingPincode: initial.billingPincode || '',
-          notes: initial.notes || '' }
+          notes: initial.notes || '', creditLimit: initial.creditLimit ? String(initial.creditLimit) : '' }
       : { ...EMPTY_FORM }
   );
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
-
   const set = (k: keyof FormData, v: string) => setForm(f => ({ ...f, [k]: v }));
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -43,7 +88,7 @@ function ContactModal({ initial, onClose, onSaved }: { initial?: Contact | null;
     setErr(''); setSaving(true);
     try {
       if (isEdit) { await api.put(`/contacts/${initial!.id}`, form); toast('Contact updated'); }
-      else { await api.post('/contacts', form); toast('Contact added'); }
+      else        { await api.post('/contacts', form); toast('Contact added'); }
       onSaved(); onClose();
     } catch (e: any) { setErr(apiError(e)); }
     finally { setSaving(false); }
@@ -60,7 +105,6 @@ function ContactModal({ initial, onClose, onSaved }: { initial?: Contact | null;
           <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500"><X size={18} /></button>
         </div>
         <form onSubmit={handleSubmit} className="p-6 space-y-5">
-          {/* Type */}
           <div>
             <span className={lbl}>Type</span>
             <div className="flex gap-2">
@@ -72,7 +116,6 @@ function ContactModal({ initial, onClose, onSaved }: { initial?: Contact | null;
               ))}
             </div>
           </div>
-          {/* Name */}
           <div className="grid grid-cols-2 gap-4">
             <div className="col-span-2">
               <label className={lbl}>Business / Full Name *</label>
@@ -83,12 +126,10 @@ function ContactModal({ initial, onClose, onSaved }: { initial?: Contact | null;
               <input value={form.displayName} onChange={e => set('displayName', e.target.value)} placeholder="Short name for invoices" className={inp} />
             </div>
           </div>
-          {/* GSTIN */}
           <div>
             <label className={lbl}>GSTIN</label>
             <input value={form.gstin} onChange={e => set('gstin', e.target.value)} placeholder="e.g. 27AAACH7409R1ZZ" className={inp} maxLength={15} />
           </div>
-          {/* Email / Phone */}
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className={lbl}>Email</label>
@@ -99,20 +140,29 @@ function ContactModal({ initial, onClose, onSaved }: { initial?: Contact | null;
               <input value={form.phone} onChange={e => set('phone', e.target.value)} placeholder="+91 98765 43210" className={inp} />
             </div>
           </div>
-          {/* Address */}
           <div className="space-y-3">
             <span className={lbl}>Billing Address</span>
             <input value={form.billingLine1} onChange={e => set('billingLine1', e.target.value)} placeholder="Street / Address line" className={inp} />
             <div className="grid grid-cols-3 gap-3">
-              <input value={form.billingCity} onChange={e => set('billingCity', e.target.value)} placeholder="City" className={inp} />
-              <input value={form.billingState} onChange={e => set('billingState', e.target.value)} placeholder="State" className={inp} />
+              <input value={form.billingCity}    onChange={e => set('billingCity', e.target.value)}    placeholder="City"    className={inp} />
+              <input value={form.billingState}   onChange={e => set('billingState', e.target.value)}   placeholder="State"   className={inp} />
               <input value={form.billingPincode} onChange={e => set('billingPincode', e.target.value)} placeholder="Pincode" className={inp} maxLength={6} />
             </div>
           </div>
-          {/* Notes */}
           <div>
             <label className={lbl}>Notes</label>
             <textarea value={form.notes} onChange={e => set('notes', e.target.value)} rows={2} placeholder="Internal notes…" className={`${inp} resize-none`} />
+          </div>
+          {/* Credit Limit */}
+          <div>
+            <label className={lbl}>Credit Limit (₹) <span className="text-slate-400 font-normal">— leave blank for unlimited</span></label>
+            <input
+              type="number" min="0" step="any"
+              value={form.creditLimit}
+              onChange={e => set('creditLimit', e.target.value)}
+              placeholder="e.g. 500000"
+              className={inp}
+            />
           </div>
           {err && <p className="text-sm text-rose-600 bg-rose-50 px-3 py-2 rounded-lg">{err}</p>}
           <div className="flex gap-3 pt-1">
@@ -160,31 +210,46 @@ function DeleteConfirm({ contact, onClose, onDeleted }: { contact: Contact; onCl
 
 /* ── Main Page ── */
 export default function Contacts() {
-  const { data, loading, error, refetch } = useFetch<Contact[]>('/contacts');
-  const [q, setQ] = useState('');
-  const [tab, setTab] = useState('ALL');
-  const [modal, setModal] = useState<'add' | 'edit' | 'delete' | null>(null);
-  const [selected, setSelected] = useState<Contact | null>(null);
+  const [result, setResult]           = useState<PagedResponse | null>(null);
+  const [loading, setLoading]         = useState(true);
+  const [error, setError]             = useState('');
+  const [page, setPage]               = useState(1);
+  const [search, setSearch]           = useState('');
+  const [searchInput, setSearchInput] = useState('');
+  const [tab, setTab]                 = useState('ALL');
+  const [modal, setModal]             = useState<'add' | 'edit' | 'delete' | null>(null);
+  const [selected, setSelected]       = useState<Contact | null>(null);
 
-  const rows = useMemo(() => {
-    let list = (data || []).filter(c => c.isActive !== false);
-    if (tab !== 'ALL') list = list.filter(c => c.type === tab || c.type === 'BOTH');
-    if (q) {
-      const t = q.toLowerCase();
-      list = list.filter(c => c.name.toLowerCase().includes(t) || c.email?.toLowerCase().includes(t) || c.gstin?.toLowerCase().includes(t) || c.phone?.includes(t));
-    }
-    return list;
-  }, [data, q, tab]);
+  const load = useCallback(async () => {
+    setLoading(true); setError('');
+    try {
+      const params = new URLSearchParams({ page: String(page), limit: String(PAGE_SIZE) });
+      if (search)        params.set('search', search);
+      if (tab !== 'ALL') params.set('type', tab);
+      const res = await api.get<PagedResponse>(`/contacts?${params}`);
+      setResult(res.data);
+    } catch (err) { setError(apiError(err)); }
+    finally { setLoading(false); }
+  }, [page, search, tab]);
 
-  const openEdit = (c: Contact) => { setSelected(c); setModal('edit'); };
+  useEffect(() => {
+    const t = setTimeout(() => { setSearch(searchInput); setPage(1); }, 350);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const openEdit   = (c: Contact) => { setSelected(c); setModal('edit'); };
   const openDelete = (c: Contact) => { setSelected(c); setModal('delete'); };
   const closeModal = () => { setModal(null); setSelected(null); };
+
+  const contacts = result?.data || [];
 
   return (
     <div className="space-y-5">
       <PageHeader
         title="Contacts"
-        subtitle={`${rows.length} contact${rows.length !== 1 ? 's' : ''}`}
+        subtitle={result ? `${result.total} contact${result.total !== 1 ? 's' : ''}` : 'Loading…'}
         actions={<Button onClick={() => setModal('add')}><Plus size={15} /> Add Contact</Button>}
       />
 
@@ -192,33 +257,44 @@ export default function Contacts() {
       <div className="flex items-center justify-between gap-4 flex-wrap">
         <div className="flex gap-1.5">
           {TABS.map(t => (
-            <button key={t} onClick={() => setTab(t)}
-              className={`px-3 py-1.5 text-sm rounded-lg font-medium transition-colors ${tab === t ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'}`}>
+            <button key={t} onClick={() => { setTab(t); setPage(1); }}
+              className={`px-3 py-1.5 text-sm rounded-lg font-medium transition-colors ${
+                tab === t ? 'bg-slate-900 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+              }`}>
               {t === 'ALL' ? 'All' : t.charAt(0) + t.slice(1).toLowerCase() + 's'}
             </button>
           ))}
         </div>
         <div className="relative flex-1 max-w-sm min-w-[200px]">
           <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search name, email, GSTIN…"
-            className="w-full pl-9 pr-3 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400/40 focus:border-slate-500 bg-white" />
+          <input value={searchInput} onChange={e => setSearchInput(e.target.value)}
+            placeholder="Search name, email, GSTIN, phone…"
+            className="w-full pl-9 pr-8 py-2 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400/40 focus:border-slate-500 bg-white" />
+          {searchInput && (
+            <button onClick={() => { setSearchInput(''); setSearch(''); setPage(1); }}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+              <X size={13} />
+            </button>
+          )}
         </div>
       </div>
 
       <Card>
-        {loading ? <Loading /> : error ? <ErrorState message={error} onRetry={refetch} /> :
-          rows.length === 0 ? (
+        {loading ? <Loading /> : error ? <ErrorState message={error} onRetry={load} /> :
+          contacts.length === 0 ? (
             <EmptyState
-              title="No contacts yet"
-              hint={tab === 'ALL' ? 'Click "Add Contact" to create your first customer or vendor.' : `No ${tab.toLowerCase()}s found.`}
+              title="No contacts"
+              hint={search || tab !== 'ALL'
+                ? 'Try clearing your search or filter.'
+                : 'Click "Add Contact" to create your first customer or vendor.'}
             />
           ) : (
             <Table>
               <thead>
-                <tr><Th>Name</Th><Th>Type</Th><Th>GSTIN</Th><Th>Contact</Th><Th>Location</Th><Th></Th></tr>
+                <tr><Th>Name</Th><Th>Type</Th><Th>GSTIN</Th><Th>Contact</Th><Th>Location</Th><Th className="text-right">Credit Limit</Th><Th></Th></tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {rows.map(c => (
+                {contacts.map(c => (
                   <tr key={c.id} className="hover:bg-slate-50 group">
                     <Td>
                       <div className="font-medium text-slate-800">{c.name}</div>
@@ -234,6 +310,14 @@ export default function Contacts() {
                       </div>
                     </Td>
                     <Td className="text-slate-500">{[c.billingCity, c.billingState].filter(Boolean).join(', ') || '—'}</Td>
+                    <Td className="text-right">
+                      {Number(c.creditLimit) > 0
+                        ? <span className="text-xs font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">
+                            ₹{Number(c.creditLimit).toLocaleString('en-IN')}
+                          </span>
+                        : <span className="text-xs text-slate-400">Unlimited</span>
+                      }
+                    </Td>
                     <Td>
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button onClick={() => openEdit(c)} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-700" title="Edit">
@@ -249,13 +333,16 @@ export default function Contacts() {
               </tbody>
             </Table>
           )}
+        {result && (
+          <Pagination page={result.page} pageCount={result.pageCount} total={result.total} limit={PAGE_SIZE} onPage={setPage} />
+        )}
       </Card>
 
       {(modal === 'add' || modal === 'edit') && (
-        <ContactModal initial={modal === 'edit' ? selected : null} onClose={closeModal} onSaved={refetch} />
+        <ContactModal initial={modal === 'edit' ? selected : null} onClose={closeModal} onSaved={() => { load(); closeModal(); }} />
       )}
       {modal === 'delete' && selected && (
-        <DeleteConfirm contact={selected} onClose={closeModal} onDeleted={refetch} />
+        <DeleteConfirm contact={selected} onClose={closeModal} onDeleted={() => { load(); closeModal(); }} />
       )}
     </div>
   );

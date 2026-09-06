@@ -20,12 +20,34 @@ function computeLines(lines: any[]) {
 export const getAll = async (req: Request, res: Response) => {
   try {
     const companyId = (req as any).user.companyId;
-    const data = await prisma.vendor_bills.findMany({
-      where: { companyId },
-      include: { vendor: true, lines: { include: { product: true } } },
-      orderBy: { date: 'desc' },
-    });
-    res.json(data);
+
+    // --- Pagination & filters ---
+    const page   = Math.max(1, parseInt(String(req.query.page  || '1'), 10));
+    const limit  = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '15'), 10)));
+    const search = String(req.query.search || '').trim();
+    const status = String(req.query.status || '').trim().toUpperCase();
+
+    const where: any = { companyId };
+    if (status && status !== 'ALL') where.status = status;
+    if (search) {
+      where.OR = [
+        { billNumber: { contains: search, mode: 'insensitive' } },
+        { vendor:     { name: { contains: search, mode: 'insensitive' } } },
+      ];
+    }
+
+    const [total, data] = await prisma.$transaction([
+      prisma.vendor_bills.count({ where }),
+      prisma.vendor_bills.findMany({
+        where,
+        include: { vendor: true, lines: { include: { product: true } } },
+        orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+    ]);
+
+    res.json({ data, total, page, pageCount: Math.ceil(total / limit) });
   } catch (error: any) {
     res.status(500).json({ message: "Server Error", error: error.message });
   }
